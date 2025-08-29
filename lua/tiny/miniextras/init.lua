@@ -1,91 +1,10 @@
---- *mini.extra* Extra 'mini.nvim' functionality
---- *MiniExtra*
----
---- MIT License Copyright (c) 2023 Evgeni Chasnovski
----
---- ==============================================================================
----
---- Extra useful functionality which is not essential enough for other 'mini.nvim'
---- modules to include directly.
----
---- Features:
----
---- - Various pickers for 'mini.pick':
----     - Built-in diagnostic (|MiniExtra.pickers.diagnostic()|).
----     - File explorer (|MiniExtra.pickers.explorer()|).
----     - Git branches/commits/files/hunks (|MiniExtra.pickers.git_hunks()|, etc.).
----     - Command/search/input history (|MiniExtra.pickers.history()|).
----     - LSP references/symbols/etc. (|MiniExtra.pickers.lsp()|).
----     - Tree-sitter nodes (|MiniExtra.pickers.treesitter()|).
----     - And much more.
----   See |MiniExtra.pickers| for more.
----
---- - Various textobject specifications for 'mini.ai'. See |MiniExtra.gen_ai_spec|.
----
---- - Various highlighters for 'mini.hipatterns'. See |MiniExtra.gen_highlighter|.
----
---- Notes:
---- - This module requires only those 'mini.nvim' modules which are needed for
----   a particular functionality: 'mini.pick' for pickers, etc.
----
---- # Setup ~
----
---- This module needs a setup with `require('mini.extra').setup({})` (replace
---- `{}` with your `config` table). It will create global Lua table `MiniExtra`
---- which you can use for scripting or manually (with `:lua MiniExtra.*`).
----
---- See |MiniExtra.config| for `config` structure and default values.
----
---- This module doesn't have runtime options, so using `vim.b.miniextra_config`
---- will have no effect here.
----
---- # Comparisons ~
----
---- - 'nvim-telescope/telescope.nvim':
----     - With |MiniExtra.pickers|, 'mini.pick' is reasonably on par when it comes
----       to built-in pickers.
----
---- - 'ibhagwan/fzf-lua':
----     - Same as 'nvim-telescope/telescope.nvim'.
-
----@diagnostic disable:undefined-field
----@diagnostic disable:discard-returns
----@diagnostic disable:unused-local
----@diagnostic disable:cast-local-type
----@diagnostic disable:undefined-doc-name
----@diagnostic disable:luadoc-miss-type-name
-
----@alias __extra_ai_spec_return function Function implementing |MiniAi-textobject-specification|.
----@alias __extra_pickers_local_opts table|nil Options defining behavior of this particular picker.
----@alias __extra_pickers_opts table|nil Options forwarded to |MiniPick.start()|.
----@alias __extra_pickers_return any Output of the called picker.
----@alias __extra_pickers_git_notes Notes:
---- - Requires executable `git`.
---- - Requires target path to be part of git repository.
---- - Present for exploration and navigation purposes. Doing any Git operations
----   is suggested to be done in a dedicated Git client and is not planned.
----@alias __extra_pickers_preserve_order - <preserve_order> `(boolean)` - whether to preserve original order
----     during query. Default: `false`.
----@alias __extra_pickers_git_path - <path> `(string|nil)` - target path for Git operation (if required). Also
----     used to find Git repository inside which to construct items.
----     Default: `nil` for root of Git repository containing |current-directory|.
-
--- Module definition ==========================================================
-local MiniExtra = {}
+local TinyMiniExtra = {}
 local H = {}
 
---- Module setup
----
----@param config table|nil Module config table. See |MiniExtra.config|.
----
----@usage >lua
----   require('mini.extra').setup() -- use default config
----   -- OR
----   require('mini.extra').setup({}) -- replace {} with your config table
---- <
-MiniExtra.setup = function(config)
+
+TinyMiniExtra.setup = function(config)
   -- Export module
-  _G.MiniExtra = MiniExtra
+  _G.TinyMiniExtra = TinyMiniExtra
 
   -- Setup config
   config = H.setup_config(config)
@@ -94,286 +13,11 @@ MiniExtra.setup = function(config)
   H.apply_config(config)
 end
 
---stylua: ignore
---- Module config
----
---- Default values:
----@eval return MiniDoc.afterlines_to_code(MiniDoc.current.eval_section)
-MiniExtra.config = {}
---minidoc_afterlines_end
 
---- 'mini.ai' textobject specification generators
----
---- This is a table with function elements. Call to actually get specification.
----
---- Assumed to be used as part of |MiniAi.setup()|. Example: >lua
----
----   local gen_ai_spec = require('mini.extra').gen_ai_spec
----   require('mini.ai').setup({
----     custom_textobjects = {
----       B = gen_ai_spec.buffer(),
----       D = gen_ai_spec.diagnostic(),
----       I = gen_ai_spec.indent(),
----       L = gen_ai_spec.line(),
----       N = gen_ai_spec.number(),
----     },
----   })
---- <
-MiniExtra.gen_ai_spec = {}
+TinyMiniExtra.config = {}
 
---- Current buffer textobject
----
---- Notes:
---- - `a` textobject selects all lines in a buffer.
---- - `i` textobject selects all lines except blank lines at start and end.
----
----@return __extra_ai_spec_return
-MiniExtra.gen_ai_spec.buffer = function()
-  return function(ai_type)
-    local start_line, end_line = 1, vim.fn.line('$')
-    if ai_type == 'i' then
-      -- Skip first and last blank lines for `i` textobject
-      local first_nonblank, last_nonblank = vim.fn.nextnonblank(start_line), vim.fn.prevnonblank(end_line)
-      -- Do nothing for buffer with all blanks
-      if first_nonblank == 0 or last_nonblank == 0 then return { from = { line = start_line, col = 1 } } end
-      start_line, end_line = first_nonblank, last_nonblank
-    end
+TinyMiniExtra.pickers = {}
 
-    local to_col = math.max(vim.fn.getline(end_line):len(), 1)
-    return { from = { line = start_line, col = 1 }, to = { line = end_line, col = to_col } }
-  end
-end
-
---- Current buffer diagnostic textobject
----
---- Notes:
---- - Both `a` and `i` textobjects return |vim.diagnostic.get()| output for the
----   current buffer. It is modified to fit |MiniAi-textobject-specification|.
----
----@param severity any Which severity to use. Forwarded to |vim.diagnostic.get()|.
----   Default: `nil` to use all diagnostic entries.
----
----@return __extra_ai_spec_return
-MiniExtra.gen_ai_spec.diagnostic = function(severity)
-  return function(ai_type)
-    local cur_diag = vim.diagnostic.get(0, { severity = severity })
-
-    local regions = {}
-    for _, diag in ipairs(cur_diag) do
-      local from = { line = diag.lnum + 1, col = diag.col + 1 }
-      local to = { line = diag.end_lnum + 1, col = diag.end_col }
-      if to.line == nil or to.col == nil then to = { line = diag.lnum + 1, col = diag.col + 1 } end
-      table.insert(regions, { from = from, to = to })
-    end
-    return regions
-  end
-end
-
---- Current buffer indent scopes textobject
----
---- Indent scope is a set of consecutive lines with the following properties:
---- - Lines above first and below last are non-blank. They are called borders.
---- - There is at least one non-blank line in a set.
---- - All non-blank lines between borders have strictly greater indent
----   (perceived leading space respecting |tabstop|) than either of borders.
----
---- Notes:
---- - `a` textobject selects scope including borders.
---- - `i` textobject selects the scope charwise.
---- - Differences with |MiniIndentscope.textobject|:
----     - This textobject always treats blank lines on top and bottom of `i`
----       textobject as part of it, while 'mini.indentscope' can configure that.
----     - This textobject can select non-covering scopes, while 'mini.indentscope'
----       can not (by design).
----     - In this textobject scope computation is done only by "casting rays" from
----       top to bottom and not in both ways as in 'mini.indentscope'.
----       This works in most common scenarios and doesn't work only if indent of
----       of the bottom border is expected to be larger than the top.
----
----@return function Function implementing |MiniAi-textobject-specification|.
----   It returns array of regions representing all indent scopes in the buffer
----   ordered increasingly by the start line.
-MiniExtra.gen_ai_spec.indent = function() return H.ai_indent_spec end
-
---- Current line textobject
----
---- Notes:
---- - `a` textobject selects whole line.
---- - `i` textobject selects line after initial indent.
----
----@return __extra_ai_spec_return
-MiniExtra.gen_ai_spec.line = function()
-  return function(ai_type)
-    local line_num = vim.fn.line('.')
-    local line = vim.fn.getline(line_num)
-    -- Ignore indentation for `i` textobject
-    local from_col = ai_type == 'a' and 1 or (line:match('^(%s*)'):len() + 1)
-    -- Don't select `\n` past the line to operate within a line
-    local to_col = line:len()
-
-    return { from = { line = line_num, col = from_col }, to = { line = line_num, col = to_col } }
-  end
-end
-
---- Number textobject
----
---- Notes:
---- - `a` textobject selects a whole number possibly preceded with "-" and
----   possibly followed by decimal part (dot and digits).
---- - `i` textobject selects consecutive digits.
----
----@return __extra_ai_spec_return
-MiniExtra.gen_ai_spec.number = function()
-  local digits_pattern = '%f[%d]%d+%f[%D]'
-
-  local find_a_number = function(line, init)
-    -- First find consecutive digits
-    local from, to = line:find(digits_pattern, init)
-    if from == nil then return nil, nil end
-
-    -- Make sure that these digits were not processed before. This can happen
-    -- because 'miin.ai' does next with `init = from + 1`, meaning that
-    -- "-12.34" was already matched, then it would try to match starting from
-    -- "1": we want to avoid matching that right away and avoid matching "34"
-    -- from this number.
-    if from == init and line:sub(from - 1, from - 1) == '-' then
-      init = to + 1
-      from, to = line:find(digits_pattern, init)
-    end
-    if from == nil then return nil, nil end
-
-    if line:sub(from - 2):find('^%d%.') ~= nil then
-      init = to + 1
-      from, to = line:find(digits_pattern, init)
-    end
-    if from == nil then return nil, nil end
-
-    -- Match the whole number with minus and decimal part
-    if line:sub(from - 1, from - 1) == '-' then from = from - 1 end
-    local dec_part = line:sub(to + 1):match('^%.%d+()')
-    if dec_part ~= nil then to = to + dec_part - 1 end
-    return from, to
-  end
-
-  return function(ai_type)
-    if ai_type == 'i' then return { digits_pattern } end
-    return { find_a_number, { '^().*()$' } }
-  end
-end
-
---- 'mini.hipatterns' highlighter generators
----
---- This is a table with function elements. Call to actually get specification.
----
---- Assumed to be used as part of |MiniHipatterns.setup()|. Example: >lua
----
----   local hi_words = require('mini.extra').gen_highlighter.words
----   require('mini.hipatterns').setup({
----     highlighters = {
----       todo = hi_words({ 'TODO', 'Todo', 'todo' }, 'MiniHipatternsTodo'),
----     },
----   })
---- <
-MiniExtra.gen_highlighter = {}
-
---- Highlight words
----
---- Notes:
---- - Words should start and end with alphanumeric symbol (latin letter or digit).
---- - Words will be highlighted only in full and not if part bigger word, i.e.
----   there should not be alphanumeric symbol before and after it.
----
----@param words table Array of words to highlight. Will be matched as is, not
----   as Lua pattern.
----@param group string|function Proper `group` field for `highlighter`.
----   See |MiniHipatterns.config|.
----@param extmark_opts any Proper `extmark_opts` field for `highlighter`.
----   See |MiniHipatterns.config|.
-MiniExtra.gen_highlighter.words = function(words, group, extmark_opts)
-  if not H.islist(words) then H.error('`words` should be an array.') end
-  if not (type(group) == 'string' or vim.is_callable(group)) then H.error('`group` should be string or callable.') end
-  local pattern = vim.tbl_map(function(x)
-    if type(x) ~= 'string' then H.error('All elements of `words` should be strings.') end
-    return '%f[%w]()' .. vim.pesc(x) .. '()%f[%W]'
-  end, words)
-  return { pattern = pattern, group = group, extmark_opts = extmark_opts }
-end
-
---- 'mini.pick' pickers
----
---- A table with |MiniPick| pickers (which is a hard dependency).
---- Notes:
---- - All have the same signature:
----     - <local_opts> - optional table with options local to picker.
----     - <opts> - optional table with options forwarded to |MiniPick.start()|.
---- - All of them are automatically registered in |MiniPick.registry| inside
----   both |MiniExtra.setup()| or |MiniPick.setup()| (only one is enough).
---- - All use default versions of |MiniPick-source.preview|, |MiniPick-source.choose|,
----   and |MiniPick-source.choose_marked| if not stated otherwise.
----   Shown text and |MiniPick-source.show| are targeted to the picked items.
----
---- Examples of usage:
---- - As Lua code: `MiniExtra.pickers.buf_lines()`.
---- - With |:Pick| command: `:Pick buf_lines scope='current'`
----   Note: this requires calling |MiniExtra.setup()|.
-MiniExtra.pickers = {}
-
---- Buffer lines picker
----
---- Pick from buffer lines. Notes:
---- - Loads all target buffers which are currently unloaded.
----
----@param local_opts __extra_pickers_local_opts
----   Possible fields:
----   - <scope> `(string)` - one of "all" (normal listed buffers) or "current".
----     Default: "all".
----   __extra_pickers_preserve_order
----@param opts __extra_pickers_opts
----
----@return __extra_pickers_return
-MiniExtra.pickers.buf_lines = function(local_opts, opts)
-  local pick = H.validate_pick('buf_lines')
-  local_opts = vim.tbl_deep_extend('force', { scope = 'all', preserve_order = false }, local_opts or {})
-
-  local scope = H.pick_validate_scope(local_opts, { 'all', 'current' }, 'buf_lines')
-  local is_scope_all = scope == 'all'
-
-  -- Define non-blocking callable `items` because getting all lines from all
-  -- buffers (plus loading them) may take visibly long time
-  local buffers = {}
-  if is_scope_all then
-    for _, buf_id in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.bo[buf_id].buflisted and vim.bo[buf_id].buftype == '' then table.insert(buffers, buf_id) end
-    end
-  else
-    buffers = { vim.api.nvim_get_current_buf() }
-  end
-
-  local poke_picker = pick.poke_is_picker_active
-  local f = function()
-    local items = {}
-    for _, buf_id in ipairs(buffers) do
-      if not poke_picker() then return end
-      H.buf_ensure_loaded(buf_id)
-      local buf_name = H.buf_get_name(buf_id) or ''
-      local n_digits = math.floor(math.log10(vim.api.nvim_buf_line_count(buf_id))) + 1
-      local format_pattern = '%s%' .. n_digits .. 'd\0%s'
-      for lnum, l in ipairs(vim.api.nvim_buf_get_lines(buf_id, 0, -1, false)) do
-        local prefix = is_scope_all and (buf_name .. '\0') or ''
-        table.insert(items, { text = format_pattern:format(prefix, lnum, l), bufnr = buf_id, lnum = lnum })
-      end
-    end
-    pick.set_picker_items(items)
-  end
-  local items = vim.schedule_wrap(coroutine.wrap(f))
-
-  local show = H.pick_get_config().source.show
-  if is_scope_all and show == nil then show = H.show_with_icons end
-  local match_opts = { preserve_order = local_opts.preserve_order }
-  local match = function(stritems, inds, query) pick.default_match(stritems, inds, query, match_opts) end
-  local default_source = { name = string.format('Buffer lines (%s)', scope), show = show, match = match }
-  return H.pick_start(items, { source = default_source }, opts)
-end
 
 --- Color scheme picker
 ---
@@ -393,7 +37,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.colorschemes = function(local_opts, opts)
+TinyMiniExtra.pickers.colorschemes = function(local_opts, opts)
   local pick = H.validate_pick('colorschemes')
   local_opts = local_opts or {}
 
@@ -455,7 +99,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.commands = function(local_opts, opts)
+TinyMiniExtra.pickers.commands = function(local_opts, opts)
   local pick = H.validate_pick('commands')
 
   local commands = vim.tbl_deep_extend('force', vim.api.nvim_get_commands({}), vim.api.nvim_buf_get_commands(0, {}))
@@ -494,7 +138,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.diagnostic = function(local_opts, opts)
+TinyMiniExtra.pickers.diagnostic = function(local_opts, opts)
   local pick = H.validate_pick('diagnostic')
   local_opts = vim.tbl_deep_extend('force', { get_opts = {}, scope = 'all', sort_by = 'severity' }, local_opts or {})
 
@@ -563,7 +207,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.explorer()`
+--- - `TinyMiniExtra.pickers.explorer()`
 --- - `:Pick explorer cwd='..'` - open explorer in parent directory.
 ---
 ---@param local_opts __extra_pickers_local_opts
@@ -582,7 +226,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.explorer = function(local_opts, opts)
+TinyMiniExtra.pickers.explorer = function(local_opts, opts)
   local pick = H.validate_pick('explorer')
 
   local_opts = vim.tbl_deep_extend('force', { cwd = nil, filter = nil, sort = nil }, local_opts or {})
@@ -623,7 +267,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.git_branches({ scope = 'local' })` - local branches of
+--- - `TinyMiniExtra.pickers.git_branches({ scope = 'local' })` - local branches of
 ---   the |current-directory| parent Git repository.
 --- - `:Pick git_branches path='%'` - all branches of the current file parent
 ---   Git repository.
@@ -636,7 +280,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.git_branches = function(local_opts, opts)
+TinyMiniExtra.pickers.git_branches = function(local_opts, opts)
   local pick = H.validate_pick('git_branches')
   H.validate_git('git_branches')
 
@@ -679,9 +323,9 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.git_commits()` - all commits from parent Git
+--- - `TinyMiniExtra.pickers.git_commits()` - all commits from parent Git
 ---   repository of |current-directory|.
---- - `MiniExtra.pickers.git_commits({ path = 'subdir' })` - commits affecting
+--- - `TinyMiniExtra.pickers.git_commits({ path = 'subdir' })` - commits affecting
 ---   files from 'subdir' subdirectory.
 --- - `:Pick git_commits path='%'` commits affecting current file.
 ---
@@ -691,7 +335,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.git_commits = function(local_opts, opts)
+TinyMiniExtra.pickers.git_commits = function(local_opts, opts)
   local pick = H.validate_pick('git_commits')
   H.validate_git('git_commits')
 
@@ -737,7 +381,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.git_files({ scope = 'ignored' })` - ignored files from
+--- - `TinyMiniExtra.pickers.git_files({ scope = 'ignored' })` - ignored files from
 ---   parent Git repository of |current-directory|.
 --- - `:Pick git_files path='subdir' scope='modified'` - files from 'subdir'
 ---   subdirectory which are ignored by Git.
@@ -755,7 +399,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.git_files = function(local_opts, opts)
+TinyMiniExtra.pickers.git_files = function(local_opts, opts)
   local pick = H.validate_pick('git_files')
   H.validate_git('git_files')
 
@@ -794,7 +438,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.git_hunks({ scope = 'staged' })` - staged hunks from
+--- - `TinyMiniExtra.pickers.git_hunks({ scope = 'staged' })` - staged hunks from
 ---   parent Git repository of |current-directory|.
 --- - `:Pick git_hunks path='%' n_context=0` - hunks from current file computed
 ---   with no context.
@@ -809,7 +453,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.git_hunks = function(local_opts, opts)
+TinyMiniExtra.pickers.git_hunks = function(local_opts, opts)
   local pick = H.validate_pick('git_hunks')
   H.validate_git('git_hunks')
 
@@ -866,7 +510,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.hipatterns = function(local_opts, opts)
+TinyMiniExtra.pickers.hipatterns = function(local_opts, opts)
   local pick = H.validate_pick('hipatterns')
   local has_hipatterns, hipatterns = pcall(require, 'mini.hipatterns')
   if not has_hipatterns then H.error([[`pickers.hipatterns` requires 'mini.hipatterns' which can not be found.]]) end
@@ -934,7 +578,7 @@ end
 ---
 --- Examples ~
 ---
---- - Command history: `MiniExtra.pickers.history({ scope = ':' })`
+--- - Command history: `TinyMiniExtra.pickers.history({ scope = ':' })`
 --- - Search history: `:Pick history scope='/'`
 ---
 ---@param local_opts __extra_pickers_local_opts
@@ -944,7 +588,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.history = function(local_opts, opts)
+TinyMiniExtra.pickers.history = function(local_opts, opts)
   local pick = H.validate_pick('history')
   local_opts = vim.tbl_deep_extend('force', { scope = 'all' }, local_opts or {})
 
@@ -1008,7 +652,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.hl_groups = function(local_opts, opts)
+TinyMiniExtra.pickers.hl_groups = function(local_opts, opts)
   local pick = H.validate_pick('hl_groups')
 
   -- Construct items
@@ -1062,7 +706,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.keymaps = function(local_opts, opts)
+TinyMiniExtra.pickers.keymaps = function(local_opts, opts)
   local pick = H.validate_pick('keymaps')
   local_opts = vim.tbl_deep_extend('force', { mode = 'all', scope = 'all' }, local_opts or {})
 
@@ -1135,7 +779,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.list({ scope = 'quickfix' })` - quickfix list.
+--- - `TinyMiniExtra.pickers.list({ scope = 'quickfix' })` - quickfix list.
 --- - `:Pick list scope='jump'` - jump list.
 ---
 ---@param local_opts __extra_pickers_local_opts
@@ -1145,7 +789,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.list = function(local_opts, opts)
+TinyMiniExtra.pickers.list = function(local_opts, opts)
   local pick = H.validate_pick('list')
   local_opts = vim.tbl_deep_extend('force', { scope = nil }, local_opts or {})
 
@@ -1185,7 +829,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.lsp({ scope = 'references' })` - references of the symbol
+--- - `TinyMiniExtra.pickers.lsp({ scope = 'references' })` - references of the symbol
 ---   under cursor.
 --- - `:Pick lsp scope='document_symbol'` - symbols in current file.
 ---
@@ -1198,7 +842,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return nil Nothing is returned.
-MiniExtra.pickers.lsp = function(local_opts, opts)
+TinyMiniExtra.pickers.lsp = function(local_opts, opts)
   local pick = H.validate_pick('lsp')
   local_opts = vim.tbl_deep_extend('force', { scope = nil, symbol_query = '' }, local_opts or {})
 
@@ -1228,7 +872,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.marks = function(local_opts, opts)
+TinyMiniExtra.pickers.marks = function(local_opts, opts)
   local pick = H.validate_pick('marks')
   local_opts = vim.tbl_deep_extend('force', { scope = 'all' }, local_opts or {})
 
@@ -1268,7 +912,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.oldfiles = function(local_opts, opts)
+TinyMiniExtra.pickers.oldfiles = function(local_opts, opts)
   local pick = H.validate_pick('oldfiles')
   local_opts = vim.tbl_deep_extend('force', { current_dir = false, preserve_order = false }, local_opts or {})
   local oldfiles = vim.v.oldfiles
@@ -1308,7 +952,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.options = function(local_opts, opts)
+TinyMiniExtra.pickers.options = function(local_opts, opts)
   local pick = H.validate_pick('options')
   local_opts = vim.tbl_deep_extend('force', { scope = 'all' }, local_opts or {})
 
@@ -1373,7 +1017,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.registers = function(local_opts, opts)
+TinyMiniExtra.pickers.registers = function(local_opts, opts)
   local pick = H.validate_pick('registers')
 
   local describe_register = function(regname)
@@ -1419,7 +1063,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.spellsuggest = function(local_opts, opts)
+TinyMiniExtra.pickers.spellsuggest = function(local_opts, opts)
   local pick = H.validate_pick('spellsuggest')
   local_opts = vim.tbl_deep_extend('force', { n_suggestions = 25 }, local_opts or {})
 
@@ -1454,7 +1098,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.treesitter = function(local_opts, opts)
+TinyMiniExtra.pickers.treesitter = function(local_opts, opts)
   local pick = H.validate_pick('treesitter')
 
   local buf_id = vim.api.nvim_get_current_buf()
@@ -1493,7 +1137,7 @@ end
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.visit_paths()` - visits registered for |current-directory|
+--- - `TinyMiniExtra.pickers.visit_paths()` - visits registered for |current-directory|
 ---   and ordered by "robust frecency".
 --- - `:Pick visit_paths cwd='' recency_weight=1 filter='core'` - all visits with
 ---   "core" label ordered from most to least recent.
@@ -1513,7 +1157,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return __extra_pickers_return
-MiniExtra.pickers.visit_paths = function(local_opts, opts)
+TinyMiniExtra.pickers.visit_paths = function(local_opts, opts)
   local pick = H.validate_pick('visit_paths')
   local has_visits, visits = pcall(require, 'mini.visits')
   if not has_visits then H.error([[`pickers.visit_paths` requires 'mini.visits' which can not be found.]]) end
@@ -1551,12 +1195,12 @@ end
 --- Notes:
 --- - Requires 'mini.visits'.
 --- - Preview shows target visit paths filtered to those having previewed label.
---- - Choosing essentially starts |MiniExtra.pickers.visit_paths()| for paths
+--- - Choosing essentially starts |TinyMiniExtra.pickers.visit_paths()| for paths
 ---   with the chosen label.
 ---
 --- Examples ~
 ---
---- - `MiniExtra.pickers.visit_labels()` - labels from visits registered
+--- - `TinyMiniExtra.pickers.visit_labels()` - labels from visits registered
 ---   for |current-directory|.
 --- - `:Pick visit_labels cwd=''` - labels from all visits.
 ---
@@ -1573,7 +1217,7 @@ end
 ---@param opts __extra_pickers_opts
 ---
 ---@return ... Chosen path.
-MiniExtra.pickers.visit_labels = function(local_opts, opts)
+TinyMiniExtra.pickers.visit_labels = function(local_opts, opts)
   local pick = H.validate_pick('visit_labels')
   local has_visits, visits = pcall(require, 'mini.visits')
   if not has_visits then H.error([[`pickers.visit_labels` requires 'mini.visits' which can not be found.]]) end
@@ -1617,11 +1261,11 @@ end
 
 -- Helper data ================================================================
 -- Module default config
-H.default_config = MiniExtra.config
+H.default_config = TinyMiniExtra.config
 
 -- Namespaces
 H.ns_id = {
-  pickers = vim.api.nvim_create_namespace('MiniExtraPickers'),
+  pickers = vim.api.nvim_create_namespace('TinyMiniExtraPickers'),
 }
 
 -- Various cache
@@ -1638,11 +1282,11 @@ H.setup_config = function(config)
 end
 
 H.apply_config = function(config)
-  MiniExtra.config = config
+  TinyMiniExtra.config = config
 
   -- Register pickers in 'mini.pick'
   if type(_G.MiniPick) == 'table' then
-    for name, f in pairs(MiniExtra.pickers) do
+    for name, f in pairs(TinyMiniExtra.pickers) do
       _G.MiniPick.registry[name] = _G.MiniPick.registry[name] or function(local_opts) return f(local_opts) end
     end
   end
@@ -2168,7 +1812,7 @@ H.check_type = function(name, val, ref, allow_nil)
   H.error(string.format('`%s` should be %s, not %s', name, ref, type(val)))
 end
 
-H.set_buf_name = function(buf_id, name) vim.api.nvim_buf_set_name(buf_id, 'miniextra://' .. buf_id .. '/' .. name) end
+H.set_buf_name = function(buf_id, name) vim.api.nvim_buf_set_name(buf_id, 'TinyMiniExtra://' .. buf_id .. '/' .. name) end
 
 H.is_valid_win = function(win_id) return type(win_id) == 'number' and vim.api.nvim_win_is_valid(win_id) end
 
@@ -2195,4 +1839,4 @@ end
 -- TODO: Remove after compatibility with Neovim=0.9 is dropped
 H.islist = vim.fn.has('nvim-0.10') == 1 and vim.islist or vim.tbl_islist
 
-return MiniExtra
+return TinyMiniExtra
